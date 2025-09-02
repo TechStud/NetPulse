@@ -1,0 +1,1596 @@
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="data:,">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NetPulse - Real-time Latency Monitor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class', // Enable class-based dark mode
+        theme: {
+          extend: {
+            colors: {
+              'gray-950': '#0d1117',
+              'gray-900': '#161b22',
+              'gray-800': '#21262d',
+              'gray-700': '#30363d',
+              'gray-600': '#484f58',
+            },
+            animation: {
+              'bg-scroll': 'bg-scroll 2s linear infinite',
+              'bg-scroll-reverse': 'bg-scroll-reverse 2s linear infinite',
+            },
+            keyframes: {
+              'bg-scroll': {
+                '0%': { 'background-position': '100% 0' },
+                '100%': { 'background-position': '-100% 0' },
+              },
+              'bg-scroll-reverse': {
+                '0%': { 'background-position': '-100% 0' },
+                '100%': { 'background-position': '100% 0' },
+              }
+            }
+          }
+        }
+      }
+    </script>
+    <script>
+      // This script runs before React to prevent a flash of the wrong theme.
+      if (localStorage.getItem('netPulseTheme') === 'dark' || (!('netPulseTheme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+        document.documentElement.classList.add('dark');
+      } else {
+        document.documentElement.classList.remove('dark');
+      }
+    </script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js" integrity="sha512-BNaRQnYJYiPSqHHDb58B0yaPfCu+Wgds8Gp/gU33kqBtgNS4tSPHuGibyoeqMV/TJlSKda6FXzoEyYGjTe+vXA==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" integrity="sha512-qZvrmS2ekKPF2mSznTQsxqPgnpkI4DNTlrdUmTzrDgektczlKNRRhy5X5AAOnx5S09ydFYWWNSfcEqDTTHgtNA==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+
+    <!-- React UMD scripts -->
+    <!-- <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script> -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <!-- <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script> -->
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    
+    <!-- Babel Standalone for in-browser transpilation -->
+    <!-- <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script> -->
+    <script src="./babel-standalone.js"></script>
+    <link rel="stylesheet" href="/index.css">
+<!-- 
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://aistudiocdn.com/react@^19.1.1",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.1.1/",
+    "react/": "https://aistudiocdn.com/react@^19.1.1/"
+  }
+}
+</script>
+-->
+</head>
+  <body class="bg-slate-100 text-slate-800 dark:bg-gray-950 dark:text-gray-300">
+    <div id="root"></div>
+    <script type="text/babel" data-presets="react,typescript" data-plugins="transform-modules-umd">
+      // All application code is consolidated here.
+      // The individual .ts/.tsx files are no longer used.
+
+      // --- From types.ts ---
+      
+      // --- From utils/rttUtils.ts ---
+      const calculateStats = (results) => {
+        const validResults = results.filter((r) => r !== null);
+        const successfulPings = validResults.filter(r => r.status === 'success');
+        const rttValues = successfulPings.map(r => r.rtt);
+        const sent = validResults.length;
+        const received = successfulPings.length;
+        const loss = sent > 0 ? ((sent - received) / sent) * 100 : 0;
+        if (received === 0) {
+          return { min: 0, avg: 0, max: 0, loss, sent, received };
+        }
+        const min = Math.min(...rttValues);
+        const max = Math.max(...rttValues);
+        const avg = Math.round(rttValues.reduce((sum, val) => sum + val, 0) / rttValues.length);
+        return { min, avg, max, loss, sent, received };
+      };
+      const getTimelineColor = (result, criticalThreshold) => {
+        if (!result || result.status === 'failed') {
+          return 'bg-blue-600';
+        }
+        const { rtt } = result;
+        const excellent = criticalThreshold * 0.25;
+        const good = criticalThreshold * 0.50;
+        const poor = criticalThreshold * 1.0;
+        if (rtt <= excellent) return 'bg-green-500';
+        if (rtt <= good) return 'bg-yellow-500';
+        if (rtt <= poor) return 'bg-orange-500';
+        return 'bg-red-600';
+      };
+      const getLatencyDescription = (result, criticalThreshold) => {
+        if (!result || result.status === 'failed') {
+          return 'Request Failed';
+        }
+        const { rtt } = result;
+        const excellent = criticalThreshold * 0.25;
+        const good = criticalThreshold * 0.50;
+        const poor = criticalThreshold * 1.0;
+        if (rtt <= excellent) return 'Excellent';
+        if (rtt <= good) return 'Good';
+        if (rtt <= poor) return 'Poor';
+        return 'Very Poor';
+      };
+
+      // --- From utils/netUtils.ts ---
+      const IPV4_REGEX = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+      const IPV6_REGEX = /^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))$/i;
+      const DOMAIN_REGEX = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/i;
+      const validateHostFormat = (host) => {
+        if (IPV4_REGEX.test(host)) return { isValid: true, type: 'ipv4' };
+        if (IPV6_REGEX.test(host)) return { isValid: true, type: 'ipv6' };
+        if (DOMAIN_REGEX.test(host)) return { isValid: true, type: 'domain' };
+        return { isValid: false, type: 'invalid' };
+      };
+      const resolveHost = async (host) => {
+        const validation = validateHostFormat(host);
+        if (!validation.isValid) {
+          return { result: null, error: 'Invalid host format.' };
+        }
+        let queryName = host;
+        let queryType = 'A';
+        if (validation.type === 'ipv4') {
+          queryName = host.split('.').reverse().join('.') + '.in-addr.arpa';
+          queryType = 'PTR';
+        } else if (validation.type === 'ipv6') {
+          return { result: `Valid IPv6 address`, error: null };
+        }
+        try {
+          const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(queryName)}&type=${queryType}`, {
+            headers: { 'accept': 'application/dns-json' },
+          });
+          if (!response.ok) {
+            throw new Error(`DNS query failed with status ${response.status}`);
+          }
+          const data = await response.json();
+          if (data.Status !== 0 || !data.Answer || data.Answer.length === 0) {
+            if (validation.type === 'domain') return { result: null, error: 'Host not found.' };
+            if (validation.type === 'ipv4') return { result: `No PTR record found.`, error: null };
+            return { result: null, error: 'DNS record not found.' };
+          }
+          const answer = data.Answer[0].data.replace(/"/g, '').replace(/\.$/, '');
+          if (validation.type === 'domain') {
+            return { result: `Resolves to: ${answer}`, error: null };
+          }
+          if (validation.type === 'ipv4') {
+            return { result: `PTR: ${answer}`, error: null };
+          }
+          return { result: null, error: null };
+        } catch (err) {
+          console.error('DNS resolution error:', err);
+          return { result: null, error: 'DNS resolution failed. Check network connection.' };
+        }
+      };
+      const getLocalIpAddress = () => {
+        return new Promise((resolve) => {
+          try {
+            const rtc = new RTCPeerConnection({ iceServers: [] });
+            rtc.createDataChannel('');
+            rtc.onicecandidate = (e) => {
+              if (!e.candidate || !e.candidate.candidate) return;
+              const candidate = e.candidate.candidate;
+              const ipRegex = /([0-9]{1,3}(\.[0-9]{1,3}){3})/;
+              const match = ipRegex.exec(candidate);
+              if (match && match[1] && match[1] !== '127.0.0.1') {
+                rtc.onicecandidate = null;
+                try { rtc.close(); } catch (err) {}
+                resolve(match[1]);
+              }
+            };
+            rtc.createOffer()
+              .then(offer => rtc.setLocalDescription(offer))
+              .catch(err => {
+                console.error("WebRTC offer creation failed:", err);
+                resolve(null);
+              });
+            setTimeout(() => {
+              try { rtc.close(); } catch(err) {}
+              resolve(null);
+            }, 1000);
+          } catch (err) {
+            console.error("WebRTC initialization failed:", err);
+            resolve(null);
+          }
+        });
+      };
+      const getExternalIpAddress = async () => {
+        try {
+          const response = await fetch('https://api.ipify.org?format=json');
+          if (!response.ok) throw new Error('Failed to fetch external IP');
+          const data = await response.json();
+          return data.ip || null;
+        } catch (error) {
+          console.error("Could not fetch external IP:", error);
+          return null;
+        }
+      };
+      
+      // --- From utils/favicon.ts ---
+      const createFavicon = (color) => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 32;
+        canvas.height = 32;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.arc(16, 16, 14, 0, 2 * Math.PI);
+          ctx.fill();
+        }
+        return canvas.toDataURL('image/png');
+      };
+      const faviconColors = {
+        idle: '#06b6d4', excellent: '#22c55e', good: '#eab308',
+        poor: '#f97316', critical: '#dc2626', failed: '#2563eb',
+      };
+      const updateFavicon = (status, latestResult, criticalThreshold) => {
+        let color = faviconColors.idle;
+        if (status === 'running' && latestResult) {
+          if (latestResult.status === 'failed') {
+            color = faviconColors.failed;
+          } else {
+            const { rtt } = latestResult;
+            const excellent = criticalThreshold * 0.25;
+            const good = criticalThreshold * 0.50;
+            const poor = criticalThreshold * 1.0;
+            if (rtt <= excellent) color = faviconColors.excellent;
+            else if (rtt <= good) color = faviconColors.good;
+            else if (rtt <= poor) color = faviconColors.poor;
+            else color = faviconColors.critical;
+          }
+        }
+        const link = document.querySelector("link[rel*='icon']") || document.createElement('link');
+        link.type = 'image/png';
+        link.rel = 'shortcut icon';
+        link.href = createFavicon(color);
+        document.getElementsByTagName('head')[0].appendChild(link);
+      };
+      
+      // --- From utils/exportUtils.ts ---
+      const getFileName = (settings, extension) => 
+        `netpulse_${settings.host}_${new Date().toISOString().replace(/:/g, '-')}.${extension}`;
+      const getAllResults = (results) => {
+        return Object.values(results).flat().filter((r) => r !== null);
+      };
+      const exportToCsv = (results, settings) => {
+        const allResults = getAllResults(results);
+        if (allResults.length === 0) return alert("No data to export.");
+        let csvContent = "data:text/csv;charset=utf-8,";
+        csvContent += "Timestamp,RTT (ms),Status\r\n";
+        allResults.forEach(res => {
+          const timestamp = new Date(res.timestamp).toISOString();
+          const row = `${timestamp},${res.rtt},${res.status}`;
+          csvContent += row + "\r\n";
+        });
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", getFileName(settings, 'csv'));
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      };
+      const exportToPng = async (element, settings) => {
+        if (!element) return alert("Could not find the element to capture.");
+        const animatedElements = element.querySelectorAll('.animate-pulse');
+        animatedElements.forEach(el => el.classList.remove('animate-pulse'));
+        const isDarkMode = document.documentElement.classList.contains('dark');
+        const backgroundColor = isDarkMode ? '#161b22' : '#ffffff';
+        try {
+          const canvas = await html2canvas(element, { backgroundColor, useCORS: true });
+          const image = canvas.toDataURL("image/png", 1.0);
+          const link = document.createElement('a');
+          link.download = getFileName(settings, 'png');
+          link.href = image;
+          link.click();
+        } catch (error) {
+          console.error("Failed to export as PNG:", error);
+          alert("An error occurred while exporting the image.");
+        } finally {
+          animatedElements.forEach(el => el.classList.add('animate-pulse'));
+        }
+      };
+      const exportToXlsx = (results, settings) => {
+        const allResults = getAllResults(results);
+        if (allResults.length === 0) return alert("No data to export.");
+        const dataForSheet = allResults.map(res => ({
+          Timestamp: new Date(res.timestamp).toISOString(),
+          'RTT (ms)': res.rtt,
+          Status: res.status
+        }));
+        const worksheet = XLSX.utils.json_to_sheet(dataForSheet);
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, worksheet, "Ping Results");
+        XLSX.writeFile(workbook, getFileName(settings, 'xlsx'));
+      };
+      const exportToPdf = async (element, settings) => {
+        if (!element) return alert("Could not find the element to capture.");
+        const animatedElements = element.querySelectorAll('.animate-pulse');
+        animatedElements.forEach(el => el.classList.remove('animate-pulse'));
+        const isDarkMode = document.documentElement.classList.contains('dark');
+        const backgroundColor = isDarkMode ? '#161b22' : '#ffffff';
+        try {
+          const canvas = await html2canvas(element, { backgroundColor, useCORS: true });
+          const imgData = canvas.toDataURL('image/png');
+          const { jsPDF } = jspdf;
+          const pdf = new jsPDF({
+            orientation: 'landscape',
+            unit: 'px',
+            format: [canvas.width, canvas.height]
+          });
+          pdf.addImage(imgData, 'PNG', 0, 0, canvas.width, canvas.height);
+          pdf.save(getFileName(settings, 'pdf'));
+        } catch (error) {
+          console.error("Failed to export as PDF:", error);
+          alert("An error occurred while exporting the PDF.");
+        } finally {
+          animatedElements.forEach(el => el.classList.add('animate-pulse'));
+        }
+      };
+      
+      // --- From contexts/TooltipContext.tsx ---
+      const TooltipContext = React.createContext(undefined);
+      const TooltipProvider = ({ children }) => {
+        const [activeTooltip, setActiveTooltip] = React.useState(null);
+        return (
+          <TooltipContext.Provider value={{ activeTooltip, setActiveTooltip }}>
+            {children}
+          </TooltipContext.Provider>
+        );
+      };
+      const useTooltip = () => {
+        const context = React.useContext(TooltipContext);
+        if (context === undefined) {
+          throw new Error('useTooltip must be used within a TooltipProvider');
+        }
+        return context;
+      };
+      
+      // --- From components/Clock.tsx ---
+      const Clock = ({ status }) => {
+        const [now, setNow] = React.useState(new Date());
+        const [color, setColor] = React.useState('text-cyan-600 dark:text-cyan-400');
+        React.useEffect(() => {
+          const timerId = setInterval(() => setNow(new Date()), 1000);
+          return () => clearInterval(timerId);
+        }, []);
+        React.useEffect(() => {
+          switch (status) {
+            case 'Running':
+              setColor('text-green-500');
+              break;
+            case 'Stopped':
+            case 'Finished':
+              setColor('text-red-500 animate-pulse');
+              const timeoutId = setTimeout(() => {
+                setColor('text-cyan-600 dark:text-cyan-400');
+              }, 3000);
+              return () => clearTimeout(timeoutId);
+            case 'Idle':
+            default:
+              setColor('text-cyan-600 dark:text-cyan-400');
+              break;
+          }
+        }, [status]);
+        const dateString = now.toLocaleDateString(undefined, {
+          weekday: 'short', year: 'numeric', month: 'short', day: 'numeric'
+        });
+        return (
+          <div className="text-right">
+            <div className="text-xs text-cyan-600 dark:text-cyan-400 mb-1">{dateString}</div>
+            <div className={`text-lg font-bold transition-colors duration-300 ${color}`}>
+              {now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}
+            </div>
+          </div>
+        );
+      };
+      
+      // --- From components/TimerDisplay.tsx ---
+      const padZero = (num) => num.toString().padStart(2, '0');
+      const formatSeconds = (totalSeconds) => {
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+        return `${padZero(hours)}:${padZero(minutes)}:${padZero(seconds)}`;
+      };
+      const TimerDisplay = ({ status, startTime, durationMinutes }) => {
+        const [remaining, setRemaining] = React.useState(durationMinutes * 60);
+        const [eta, setEta] = React.useState(null);
+        React.useEffect(() => {
+          if (status === 'Running' && startTime) {
+            const durationMs = durationMinutes * 60 * 1000;
+            const endTime = startTime + durationMs;
+            setEta(new Date(endTime));
+            const intervalId = setInterval(() => {
+              const now = Date.now();
+              const newRemaining = Math.max(0, Math.round((endTime - now) / 1000));
+              setRemaining(newRemaining);
+            }, 1000);
+            return () => clearInterval(intervalId);
+          } else {
+            setRemaining(durationMinutes * 60);
+            setEta(null);
+          }
+        }, [status, startTime, durationMinutes]);
+        if (status !== 'Running') {
+          return null;
+        }
+        return (
+          <div className="text-xs text-gray-600 dark:text-gray-400 mt-1 space-y-1">
+            <div>
+              <span className="font-semibold text-gray-500">Remaining:</span> <span className="text-yellow-500 font-semibold">{formatSeconds(remaining)}</span>
+            </div>
+            {eta && (
+              <div>
+                <span className="font-semibold text-gray-500">End Time:</span> {eta.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}
+              </div>
+            )}
+          </div>
+        );
+      };
+      
+      // --- From components/Legend.tsx --- (Sparkline Component)
+      const DetailedTooltipContent = ({ data, settings }) => {
+        const { result, timestamp } = data;
+        const date = new Date(timestamp);
+        const timeStr = date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short' });
+        const dateStr = date.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+        const targetDisplay = () => {
+            const { host, resolvedHost } = settings;
+            if (!resolvedHost || resolvedHost.startsWith('No PTR')) return host;
+            const hostType = validateHostFormat(host).type;
+            if (hostType === 'domain' && resolvedHost.startsWith('Resolves to:')) return `${host} - ${resolvedHost.substring(12).trim()}`;
+            if ((hostType === 'ipv4' || hostType === 'ipv6') && resolvedHost.startsWith('PTR:')) return `${host} - ${resolvedHost.substring(5).trim()}`;
+            return host;
+        };
+        if (!result) {
+            return (
+                <div className="grid grid-cols-[auto_1fr] gap-x-2">
+                    <span className="font-bold text-gray-500 dark:text-gray-400">Time:</span><span>{timeStr}</span>
+                    <p className="col-span-2 text-yellow-500 mt-1">No data for this time.</p>
+                </div>
+            );
+        }
+        return (
+            <div className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1">
+                <span className="font-bold text-gray-500 dark:text-gray-400 text-right">Date</span><span>: {dateStr}</span>
+                <span className="font-bold text-gray-500 dark:text-gray-400 text-right">Time</span><span>: {timeStr}</span>
+                <span className="font-bold text-gray-500 dark:text-gray-400 text-right">Target</span><span>: {targetDisplay()}</span>
+                <span className="font-bold text-gray-500 dark:text-gray-400 text-right">Latency</span>
+                <span>: {result.rtt} ms - <span className="font-semibold">{getLatencyDescription(result, settings.criticalThreshold)}</span></span>
+                <span className="font-bold text-gray-500 dark:text-gray-400 text-right">Threshold</span><span>: {settings.criticalThreshold} ms (Critical)</span>
+            </div>
+        );
+      };
+      const Tooltip = ({ data, settings, active, dataLength }) => {
+        const { result, timestamp, index } = data;
+        const positionStyle = { top: 0, transform: 'translateY(calc(-100% - 8px))', pointerEvents: 'none', position: 'absolute', zIndex: 10 };
+        const maxIndex = dataLength > 1 ? dataLength - 1 : 1;
+        if(index < maxIndex / 2) positionStyle.left = `${(index / maxIndex) * 100}%`;
+        else positionStyle.right = `${(1 - (index / maxIndex)) * 100}%`;
+        const timeFormatOptions = { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
+        if (settings.pingsPerSecond > 1) {
+            const advancedOptions = { ...timeFormatOptions, fractionalSecondDigits: 2 };
+            return <div style={positionStyle} className="p-3 bg-white dark:bg-gray-950 text-slate-800 dark:text-white text-xs rounded-md shadow-lg border border-slate-200 dark:border-gray-600 whitespace-nowrap">
+                {active ? <DetailedTooltipContent data={data} settings={settings} /> : <div className="text-center"><div className="font-bold">{new Date(timestamp).toLocaleTimeString([], advancedOptions)}</div>{result && <div>Latency: {result.status === 'success' ? `${result.rtt} ms` : 'Failed'}</div>}</div>}
+            </div>;
+        }
+        return <div style={positionStyle} className="p-3 bg-white dark:bg-gray-950 text-slate-800 dark:text-white text-xs rounded-md shadow-lg border border-slate-200 dark:border-gray-600 whitespace-nowrap">
+            {active ? <DetailedTooltipContent data={data} settings={settings} /> : <div className="text-center"><div className="font-bold">{new Date(timestamp).toLocaleTimeString([], timeFormatOptions)}</div>{result && <div>Latency: {result.status === 'success' ? `${result.rtt} ms` : 'Failed'}</div>}</div>}
+        </div>;
+      };
+      const Sparkline = ({ data, settings, minuteTimestamp }) => {
+        const [hoverData, setHoverData] = React.useState(null);
+        const svgRef = React.useRef(null);
+        const { activeTooltip, setActiveTooltip } = useTooltip();
+        const { criticalThreshold, pingsPerSecond } = settings;
+        const isActive = activeTooltip?.minuteTimestamp === minuteTimestamp;
+        const activeDataForThisRow = isActive ? activeTooltip : null;
+        const dataLength = 60 * pingsPerSecond;
+        if (data.filter(d => d !== null).length < 1 && !activeDataForThisRow) {
+            return <div className="w-full h-full bg-slate-200/50 dark:bg-gray-800/50 rounded-sm" />;
+        }
+        const successfulPings = data.map(d => d?.rtt).filter((rtt) => rtt !== null && rtt !== undefined);
+        const VIEWBOX_WIDTH = 120;
+        const VIEWBOX_HEIGHT = 20;
+        const maxRtt = Math.max(...successfulPings, criticalThreshold); 
+        const colorMap = {
+            'bg-green-500': '#22c55e', 'bg-yellow-500': '#eab308', 'bg-orange-500': '#f97316',
+            'bg-red-600': '#dc2626', 'bg-blue-600': '#2563eb',
+        };
+        const getPoint = (result, index) => {
+            const maxIndex = dataLength > 1 ? dataLength - 1 : 1;
+            const x = (index / maxIndex) * VIEWBOX_WIDTH;
+            const rtt = result?.rtt ?? null;
+            const y = (rtt === null || result?.status === 'failed')
+            ? VIEWBOX_HEIGHT 
+            : VIEWBOX_HEIGHT - ((rtt / maxRtt) * (VIEWBOX_HEIGHT - 2) + 1);
+            return { x, y };
+        }
+        const handleMouseMove = (event) => {
+            if (!svgRef.current) return;
+            const rect = svgRef.current.getBoundingClientRect();
+            const x = event.clientX - rect.left;
+            const maxIndex = dataLength > 1 ? dataLength - 1 : 1;
+            const index = Math.min(maxIndex, Math.max(0, Math.round((x / rect.width) * maxIndex)));
+            const result = data[index];
+            const point = getPoint(result, index);
+            const timestamp = result?.timestamp || (new Date(minuteTimestamp).getTime() + index * (60000 / dataLength));
+            setHoverData({ index, result, x: point.x, y: point.y, timestamp });
+        };
+        const handleMouseLeave = () => setHoverData(null);
+        const handleClick = () => {
+            if (isActive && activeTooltip?.index === hoverData?.index) setActiveTooltip(null);
+            else if (hoverData) setActiveTooltip({ ...hoverData, minuteTimestamp });
+        };
+        const displayData = activeDataForThisRow || hoverData;
+        const indicatorColorName = getTimelineColor(displayData?.result ?? null, criticalThreshold);
+        const indicatorFill = colorMap[indicatorColorName] || '#6b7280';
+        return (
+            <div className="w-full h-full relative">
+            <svg ref={svgRef} width="100%" height="100%" viewBox={`0 0 ${VIEWBOX_WIDTH} ${VIEWBOX_HEIGHT}`} className="bg-slate-200/50 dark:bg-gray-800/50 rounded-sm cursor-crosshair" preserveAspectRatio="none" onMouseMove={handleMouseMove} onMouseLeave={handleMouseLeave} onClick={handleClick}>
+                {data.map((result, i) => {
+                const maxIndex = dataLength > 1 ? dataLength - 1 : 1;
+                if (i >= maxIndex) return null;
+                const nextResult = data[i+1];
+                if (result === null || nextResult === null) return null;
+                const p1 = getPoint(result, i);
+                const p2 = getPoint(nextResult, i + 1);
+                const colorName = getTimelineColor(result, criticalThreshold);
+                const stroke = colorMap[colorName] || '#6b7280';
+                return <line key={i} x1={p1.x.toFixed(2)} y1={p1.y.toFixed(2)} x2={p2.x.toFixed(2)} y2={p2.y.toFixed(2)} stroke={stroke} strokeWidth="1.5" />;
+                })}
+                {displayData && (displayData.result || activeDataForThisRow) && (
+                <g className="pointer-events-none">
+                    <line x1={displayData.x} y1="0" x2={displayData.x} y2={VIEWBOX_HEIGHT} stroke="#a7a7a7" strokeWidth="0.5" strokeDasharray="2,2" />
+                    {displayData.result && <circle cx={displayData.x} cy={displayData.y} r="1.5" fill={indicatorFill} stroke="white" strokeWidth="0.5" />}
+                </g>
+                )}
+            </svg>
+            {displayData && <Tooltip data={displayData} settings={settings} active={!!activeDataForThisRow} dataLength={dataLength} />}
+            </div>
+        );
+      };
+      
+      // --- From components/StatsDisplay.tsx ---
+      const MinuteRow = ({ minuteTimestamp, results, settings }) => {
+        const timestamp = new Date(minuteTimestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+        const [isHovered, setIsHovered] = React.useState(false);
+        const displayStats = calculateStats(results);
+        return (
+          <div 
+            className={`flex items-center space-x-2 relative ${isHovered ? 'z-10' : 'z-0'}`}
+            onMouseEnter={() => setIsHovered(true)}
+            onMouseLeave={() => setIsHovered(false)}
+          >
+            <div className="w-16 text-gray-500">[{timestamp}]</div>
+            <div className="flex-1 h-5">
+              <Sparkline 
+                data={results}
+                settings={settings}
+                minuteTimestamp={minuteTimestamp}
+              />
+            </div>
+            <div className="w-32 hidden sm:flex items-center justify-around text-xs">
+              <span className="w-1/3 text-center text-green-500">{displayStats.min}ms</span>
+              <span className="w-1/3 text-center text-yellow-500 font-bold">{displayStats.avg}ms</span>
+              <span className="w-1/3 text-center text-red-500">{displayStats.max}ms</span>
+            </div>
+          </div>
+        );
+      };
+
+      // --- From components/TimelineDisplay.tsx ---
+      const Legend = ({ criticalThreshold }) => {
+        const excellent = Math.floor(criticalThreshold * 0.25);
+        const good = Math.floor(criticalThreshold * 0.50);
+        const poor = Math.floor(criticalThreshold * 1.00);
+        const tiers = [
+            { desc: `Excellent ≤ ${excellent}ms`, colorClass: getTimelineColor({ rtt: excellent, status: 'success', timestamp: 0 }, criticalThreshold) },
+            { desc: `Good ≤ ${good}ms`, colorClass: getTimelineColor({ rtt: good, status: 'success', timestamp: 0 }, criticalThreshold) },
+            { desc: `Poor ≤ ${poor}ms`, colorClass: getTimelineColor({ rtt: poor, status: 'success', timestamp: 0 }, criticalThreshold) },
+            { desc: `Very Poor > ${poor}ms`, colorClass: getTimelineColor({ rtt: poor + 1, status: 'success', timestamp: 0 }, criticalThreshold) },
+            { desc: 'Failed', colorClass: getTimelineColor(null, criticalThreshold) },
+        ];
+        return (
+            <div>
+                <h3 className="text-lg font-bold text-cyan-600 dark:text-cyan-400 mb-3">Legend</h3>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+                    {tiers.map(({ desc, colorClass }) => (
+                        <div key={desc} className="flex items-center space-x-2">
+                            <div className={`w-4 h-4 rounded-sm ${colorClass}`}></div>
+                            <span className="text-gray-600 dark:text-gray-400">{desc}</span>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        );
+      }
+      const formatDuration = (totalSeconds) => {
+        if (totalSeconds < 60) return `${totalSeconds} seconds`;
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        return `${minutes} minute${minutes > 1 ? 's' : ''}${seconds > 0 ? ` and ${seconds} second${seconds > 1 ? 's' : ''}` : ''}`;
+      }
+      const Stat = ({label, value}) => (
+        <>
+            <dt className="text-gray-500 font-semibold">{label}</dt>
+            <dd className="text-slate-800 dark:text-gray-200">{value}</dd>
+        </>
+      );
+      const ExportButton = ({ resultsRef, results, settings }) => {
+        const [isOpen, setIsOpen] = React.useState(false);
+        const menuRef = React.useRef(null);
+        React.useEffect(() => {
+            const handleClickOutside = (event) => {
+                if (menuRef.current && !menuRef.current.contains(event.target)) {
+                    setIsOpen(false);
+                }
+            };
+            document.addEventListener("mousedown", handleClickOutside);
+            return () => document.removeEventListener("mousedown", handleClickOutside);
+        }, []);
+        const handleExport = (format) => {
+            switch(format) {
+                case 'png': exportToPng(resultsRef.current, settings); break;
+                case 'csv': exportToCsv(results, settings); break;
+                case 'xlsx': exportToXlsx(results, settings); break;
+                case 'pdf': exportToPdf(resultsRef.current, settings); break;
+            }
+            setIsOpen(false);
+        };
+        return (
+            <div className="relative inline-block text-left" ref={menuRef}>
+                <button onClick={() => setIsOpen(!isOpen)} className="text-xs bg-slate-200 dark:bg-gray-700 hover:bg-slate-300 dark:hover:bg-gray-600 text-slate-700 dark:text-gray-300 font-semibold py-1 px-4 rounded-md transition duration-200">
+                    Export
+                </button>
+                {isOpen && (
+                    <div className="origin-top-right absolute right-0 mt-2 w-32 rounded-md shadow-lg bg-white dark:bg-gray-800 ring-1 ring-black ring-opacity-5 z-20">
+                        <div className="py-1" role="menu" aria-orientation="vertical">
+                            <a onClick={() => handleExport('png')} className="block px-4 py-2 text-sm text-slate-700 dark:text-gray-300 hover:bg-slate-100 dark:hover:bg-gray-700 cursor-pointer" role="menuitem">PNG</a>
+                            <a onClick={() => handleExport('csv')} className="block px-4 py-2 text-sm text-slate-700 dark:text-gray-300 hover:bg-slate-100 dark:hover:bg-gray-700 cursor-pointer" role="menuitem">CSV</a>
+                            <a onClick={() => handleExport('xlsx')} className="block px-4 py-2 text-sm text-slate-700 dark:text-gray-300 hover:bg-slate-100 dark:hover:bg-gray-700 cursor-pointer" role="menuitem">XLSX</a>
+                            <a onClick={() => handleExport('pdf')} className="block px-4 py-2 text-sm text-slate-700 dark:text-gray-300 hover:bg-slate-100 dark:hover:bg-gray-700 cursor-pointer" role="menuitem">PDF</a>
+                        </div>
+                    </div>
+                )}
+            </div>
+        );
+      };
+      const NetworkIcon = ({ label, ip, hostname, status, tooltipText, children }) => {
+        const colorClasses = {
+            off: 'text-gray-400 dark:text-gray-600 border-gray-300 dark:border-gray-700',
+            on: 'text-cyan-600 dark:text-cyan-400 border-cyan-400 dark:border-cyan-700',
+            success: 'text-green-600 dark:text-green-400 border-green-400 dark:border-green-700',
+        };
+        const currentClasses = colorClasses[status] || colorClasses.off;
+        const renderTooltipText = (text) => {
+            return text.split('\n').map((line, i) => (
+                <p key={i} className={i > 0 ? 'mt-1.5' : ''}>{line}</p>
+            ));
+        };
+        return (
+            <div className="text-center w-[7.5rem]">
+                <div className={`w-10 h-10 mx-auto bg-slate-100 dark:bg-gray-800 border rounded-full flex items-center justify-center transition-colors duration-500 ${currentClasses}`}>
+                    {children}
+                </div>
+                 <div 
+                    className={`mt-1 flex flex-col justify-start items-center transition-colors duration-500 ${status === 'off' ? 'text-gray-400 dark:text-gray-600' : 'text-gray-600 dark:text-gray-400'}`} 
+                    style={{ height: '5rem' }}
+                 >
+                    <div className="flex items-center justify-center gap-1 font-semibold">
+                        <span>{label}</span>
+                         {tooltipText && (
+                            <div className="relative group flex items-center">
+                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 cursor-help text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                     <path strokeLinecap="round" strokeLinejoin="round" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                 </svg>
+                                 <div className="absolute bottom-full mb-2 w-64 p-3 bg-gray-800 dark:bg-gray-950 text-white text-xs text-left rounded-md shadow-lg border border-gray-600 opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none z-10 -translate-x-1/2 left-1/2">
+                                    {renderTooltipText(tooltipText)}
+                                 </div>
+                            </div>
+                        )}
+                    </div>
+                    <div className="text-xs text-slate-700 dark:text-gray-300 break-words w-full px-1">{ip || <>&nbsp;</>}</div>
+                    <div className="text-xs text-gray-500 break-words w-full px-1">{hostname || <>&nbsp;</>}</div>
+                </div>
+            </div>
+        );
+      };
+      const NetworkLine = ({ outbound, inbound }) => {
+        const colorMap = {
+            cyan: "from-transparent via-cyan-500 to-transparent",
+            green: "from-transparent via-green-500 to-transparent",
+            yellow: "from-transparent via-yellow-500 to-transparent",
+            orange: "from-transparent via-orange-500 to-transparent",
+            red: "from-transparent via-red-500 to-transparent",
+            blue: "from-transparent via-blue-600 to-transparent",
+        };
+        const getLineClasses = (isAnimating, animationClass, color) => {
+            const base = "w-full h-[4px] transition-all duration-500";
+            if (!isAnimating) {
+                return `${base} bg-slate-300 dark:bg-gray-700`;
+            }
+            const gradient = colorMap[color] || colorMap.cyan;
+            return `${base} bg-[length:200%_100%] bg-gradient-to-r ${gradient} ${animationClass}`;
+        };
+        const outboundClasses = getLineClasses(outbound.animating, 'animate-bg-scroll', outbound.color);
+        const inboundClasses = getLineClasses(inbound.animating, 'animate-bg-scroll-reverse', inbound.color);
+        return (
+            <div className="h-10 flex flex-col justify-center items-center space-y-2 w-full">
+                <div className={outboundClasses} />
+                <div className={inboundClasses} />
+            </div>
+        );
+      };
+      const getTargetDisplayInfo = (settings) => {
+        const { host, resolvedHost } = settings;
+        if (!host) {
+            return { ip: null, hostname: null };
+        }
+        const { type: hostType } = validateHostFormat(host);
+        if (!resolvedHost || resolvedHost === '' || resolvedHost.includes('failed') || resolvedHost.includes('not found')) {
+             if(hostType === 'domain') return { ip: null, hostname: host };
+             return { ip: host, hostname: null };
+        }
+        if (hostType === 'domain') {
+            if (resolvedHost.startsWith('Resolves to: ')) {
+                const ip = resolvedHost.substring('Resolves to: '.length).trim();
+                return { ip: ip, hostname: host }; 
+            }
+            return { ip: null, hostname: host };
+        }
+        if (hostType === 'ipv4' || hostType === 'ipv6') {
+            const ip = host;
+            if (resolvedHost.startsWith('PTR: ')) {
+                const ptr = resolvedHost.substring('PTR: '.length).trim();
+                return { ip: ip, hostname: ptr };
+            }
+            return { ip: ip, hostname: null };
+        }
+        return { ip: host, hostname: null }; // Fallback
+      };
+      const getSimpleColorFromRtt = (result, threshold) => {
+        if (!result || result.status === 'failed') return 'blue';
+        const { rtt } = result;
+        const excellent = threshold * 0.25;
+        const good = threshold * 0.50;
+        const poor = threshold * 1.0;
+        if (rtt <= excellent) return 'green';
+        if (rtt <= good) return 'yellow';
+        if (rtt <= poor) return 'orange';
+        return 'red';
+      }
+      const NetworkPath = (props) => {
+        const { settings, status, pingResults, localIp, externalIp, externalIpHostname, internetReachable, targetReachable } = props;
+        const youStatus = internetReachable ? 'on' : 'off';
+        const internetStatus = internetReachable ? 'on' : 'off';
+        const targetStatus = targetReachable === true ? 'success' : 'off';
+        const isPinging = status === 'Running';
+        const isPingingSuccessfully = isPinging && targetReachable === true;
+        const allResults = Object.values(pingResults).flat().filter((r) => r !== null);
+        const latestResult = allResults.length > 0 ? allResults[allResults.length - 1] : null;
+        const inboundPingColor = getSimpleColorFromRtt(latestResult, settings.criticalThreshold);
+        const idleLineState = {
+            outbound: { animating: internetReachable, color: 'cyan' },
+            inbound: { animating: internetReachable, color: 'cyan' },
+        };
+        const pingingLineState = {
+            outbound: { animating: isPinging, color: 'cyan' },
+            inbound: { animating: isPingingSuccessfully, color: inboundPingColor },
+        };
+        const youTooltip = `Your local IP is found via WebRTC, which can be blocked by browser privacy settings, extensions, or VPNs.\nThe application will function correctly even if the IP isn't displayed.`;
+        const parsePtrRecord = (ptrResult) => {
+            if (!ptrResult || !ptrResult.startsWith('PTR: ')) {
+                return null;
+            }
+            return ptrResult.substring('PTR: '.length).trim();
+        };
+        const targetDisplay = getTargetDisplayInfo(settings);
+        const internetHostname = parsePtrRecord(externalIpHostname);
+        return (
+            <div className="my-6 flex items-start justify-between text-xs w-full">
+                <NetworkIcon label="You" ip={localIp} status={youStatus} tooltipText={youTooltip}>
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5.121 17.804A13.937 13.937 0 0112 16c2.5 0 4.847.655 6.879 1.804M15 10a3 3 0 11-6 0 3 3 0 016 0zm6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                </NetworkIcon>
+                <NetworkLine {...(isPinging ? pingingLineState : idleLineState)} />
+                <NetworkIcon label="Gateway" status={internetStatus}>
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071a7.5 7.5 0 0110.607 0M12 6h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                </NetworkIcon>
+                <NetworkLine {...(isPinging ? pingingLineState : idleLineState)} />
+                <NetworkIcon label="Internet" ip={externalIp} hostname={internetHostname} status={internetStatus}>
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z" />
+                    </svg>
+                </NetworkIcon>
+                <NetworkLine {...pingingLineState} />
+                <NetworkIcon label="Target" ip={targetDisplay.ip} hostname={targetDisplay.hostname} status={targetStatus}>
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2-2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
+                    </svg>
+                </NetworkIcon>
+            </div>
+        );
+      };
+      const ResultsDisplay = (props) => {
+        const { settings, status, pingResults, summaryStats, startTime } = props;
+        const resultsPanelRef = React.useRef(null);
+        const minuteKeys = Object.keys(pingResults).sort();
+        const hasResults = minuteKeys.length > 0;
+        const showWelcome = status === 'Idle' && !hasResults && !startTime;
+        const isFinished = status === 'Stopped' || status === 'Finished';
+        const formatTimestamp = (isoString, otherIsoString) => {
+            const date = new Date(isoString);
+            const otherDate = new Date(otherIsoString);
+            const options = {
+                hour: 'numeric', minute: '2-digit', second: '2-digit'
+            };
+            if (date.toDateString() !== otherDate.toDateString()) {
+                options.year = 'numeric';
+                options.month = 'short';
+                options.day = 'numeric';
+            }
+            return date.toLocaleString(undefined, options);
+        };
+        const getStatusMessage = () => {
+          if (status === 'Running') {
+              const baseMsg = `Monitoring from ${props.localIp || 'You'} to ${settings.host}...`;
+              if (props.targetReachable === 'unknown') {
+                  return <p className="text-yellow-500 animate-pulse">{baseMsg}</p>
+              }
+              return <p className="text-green-500 animate-pulse">{baseMsg}</p>
+          }
+          if (showWelcome) {
+              return <p className="text-gray-500">Configure settings and press "Start Monitoring" to begin.</p>
+          }
+          return <p className="text-cyan-600 dark:text-cyan-400">Monitoring session to {settings.host} {isFinished ? 'concluded' : status.toLowerCase()}.</p>
+        };
+        return (
+          <div ref={resultsPanelRef} className="bg-white dark:bg-gray-900 p-4 sm:p-6 rounded-lg shadow-lg border border-slate-200 dark:border-gray-700 text-sm">
+            <div className="pb-4 border-b border-slate-200 dark:border-gray-700 mb-4 flex justify-between items-start">
+              <div className="flex-1 pr-4">{getStatusMessage()}</div>
+              <div className="text-right">
+                  <Clock status={status} />
+                  <TimerDisplay status={status} startTime={startTime} durationMinutes={settings.duration} />
+              </div>
+            </div>
+            <NetworkPath {...props} />
+            {(status === 'Running' || hasResults) && (
+              <div className="mt-6 pt-4 border-t border-slate-200 dark:border-gray-700">
+                <div className="hidden sm:flex items-center text-xs text-gray-500 mb-2">
+                  <div className="w-16"></div>
+                  <div className="flex-1 text-center">Latency Graph</div>
+                  <div className="w-32 text-center">Min | Avg | Max</div>
+                </div>
+                <div className="relative space-y-1">
+                  {minuteKeys.map((minuteTimestamp) => (
+                      <MinuteRow
+                          key={minuteTimestamp}
+                          minuteTimestamp={minuteTimestamp}
+                          results={pingResults[minuteTimestamp]}
+                          settings={settings}
+                      />
+                  ))}
+                </div>
+              </div>
+            )}
+            {(hasResults || isFinished) && (
+              <div className="mt-6 pt-4 border-t border-slate-200 dark:border-gray-700">
+                  {hasResults && <Legend key={settings.criticalThreshold} criticalThreshold={settings.criticalThreshold} />}
+                  
+                  {isFinished && (
+                      <div className={hasResults ? "mt-6" : ""}>
+                          <div className="flex justify-between items-center mb-3">
+                              <h3 className="text-lg font-bold text-cyan-600 dark:text-cyan-400">Monitoring Statistics for {settings.host}</h3>
+                              {hasResults && <ExportButton resultsRef={resultsPanelRef} results={pingResults} settings={settings} />}
+                          </div>
+                          {summaryStats && summaryStats.sent > 0 ? (
+                              <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1.5 text-sm">
+                                  <Stat label="Start Time" value={formatTimestamp(summaryStats.startTime, summaryStats.stopTime)} />
+                                  <Stat label="Stop Time" value={formatTimestamp(summaryStats.stopTime, summaryStats.startTime)} />
+                                  <Stat label="Duration" value={formatDuration(summaryStats.totalDuration)} />
+                                  <Stat label="Packets" value={
+                                      <div className="flex flex-wrap items-center gap-x-4">
+                                          <span><span className="font-bold text-cyan-600 dark:text-cyan-400">&uarr;Sent:</span> {summaryStats.sent}</span>
+                                          <span><span className="font-bold text-green-500">&darr;Rcvd:</span> {summaryStats.received}</span>
+                                          <span><span className="font-bold text-red-500">&oslash;Lost:</span> {summaryStats.sent - summaryStats.received} ({summaryStats.loss.toFixed(2)}%)</span>
+                                      </div>
+                                  } />
+                                  <Stat label="Latency" value={
+                                      <div className="flex flex-wrap items-center gap-x-4">
+                                          <span><span className="font-bold text-green-500">Min:</span> {summaryStats.min}ms</span>
+                                          <span><span className="font-bold text-yellow-500">Avg:</span> {summaryStats.avg}ms</span>
+                                          <span><span className="font-bold text-red-500">Max:</span> {summaryStats.max}ms</span>
+                                      </div>
+                                  } />
+                              </dl>
+                          ) : (
+                              <p className="text-gray-500">Session ended. No data was recorded.</p>
+                          )}
+                      </div>
+                  )}
+              </div>
+            )}
+          </div>
+        );
+      };
+      
+      // --- From components/SettingsPanel.tsx ---
+      const SettingsPanel = ({ settings, setSettings, onStart, onStop, status }) => {
+        const isRunning = status === 'Running';
+        const [hostInput, setHostInput] = React.useState(settings.host);
+        const [hostError, setHostError] = React.useState(null);
+        const [resolutionInfo, setResolutionInfo] = React.useState(settings.resolvedHost || null);
+        const [isResolving, setIsResolving] = React.useState(false);
+        const [durationH, setDurationH] = React.useState(Math.floor(settings.duration / 60));
+        const [durationM, setDurationM] = React.useState(settings.duration % 60);
+        React.useEffect(() => {
+          if (settings.saveSettings) {
+            localStorage.setItem('netPulseSettings', JSON.stringify(settings));
+          } else {
+            localStorage.removeItem('netPulseSettings');
+          }
+        }, [settings]);
+        React.useEffect(() => {
+          setHostInput(settings.host);
+          setResolutionInfo(settings.resolvedHost || null);
+          setDurationH(Math.floor(settings.duration / 60));
+          setDurationM(settings.duration % 60);
+        }, [settings]);
+        const handleSettingsChange = (e) => {
+          const { name, value, type } = e.target;
+          if (type === 'checkbox') {
+              setSettings(prev => ({ ...prev, [name]: e.target.checked }));
+          } else {
+              setSettings(prev => ({
+                  ...prev,
+                  [name]: parseInt(value, 10),
+              }));
+          }
+        };
+        const handleDurationChange = (e) => {
+            const { name, value } = e.target;
+            const numValue = parseInt(value, 10) || 0;
+            let newHours = durationH;
+            let newMinutes = durationM;
+            if (name === 'durationH') {
+                newHours = numValue;
+                setDurationH(newHours);
+            } else if (name === 'durationM') {
+                newMinutes = numValue;
+                setDurationM(newMinutes);
+            }
+            const totalMinutes = (newHours * 60) + newMinutes;
+            setSettings(prev => ({ ...prev, duration: totalMinutes }));
+        }
+        const handleHostResolution = async () => {
+          if (!hostInput || hostInput === settings.host) {
+              setIsResolving(false);
+              return;
+          }
+          const { isValid } = validateHostFormat(hostInput);
+          if (!isValid) {
+              setHostError('Invalid format. Use a domain, IPv4, or IPv6 address.');
+              return;
+          }
+          setIsResolving(true);
+          setHostError(null);
+          setResolutionInfo(null);
+          const { result, error } = await resolveHost(hostInput);
+          if (error) {
+              setHostError(error);
+              setSettings(prev => ({ ...prev, host: hostInput, resolvedHost: '' }));
+          } else {
+              setResolutionInfo(result);
+              setSettings(prev => ({ ...prev, host: hostInput, resolvedHost: result || '' }));
+          }
+          setIsResolving(false);
+        };
+        const canStart = !isRunning && !hostError && !isResolving && hostInput.length > 0 && settings.duration > 0;
+        return (
+          <div className="bg-white dark:bg-gray-900 p-6 rounded-lg shadow-lg border border-slate-200 dark:border-gray-700">
+            <h2 className="text-xl font-bold text-cyan-600 dark:text-cyan-400 mb-4">Configuration</h2>
+            <div className="space-y-4">
+              <div>
+                <label htmlFor="host" className="block text-sm font-medium text-gray-600 dark:text-gray-400">Target Host</label>
+                <input
+                  type="text"
+                  id="host"
+                  name="host"
+                  value={hostInput}
+                  onChange={(e) => {
+                    setHostInput(e.target.value);
+                    setHostError(null);
+                    setResolutionInfo(null);
+                  }}
+                  onBlur={handleHostResolution}
+                  disabled={isRunning}
+                  className={`mt-1 block w-full bg-slate-100 dark:bg-gray-800 border rounded-md shadow-sm sm:text-sm text-slate-900 dark:text-white px-3 py-2 disabled:opacity-50 ${hostError ? 'border-red-500 focus:ring-red-500 focus:border-red-500' : 'border-slate-300 dark:border-gray-600 focus:ring-cyan-500 focus:border-cyan-500'}`}
+                  placeholder="e.g., google.com"
+                />
+                <div className="h-5 mt-1 text-xs">
+                  {isResolving && <p className="text-gray-500 dark:text-gray-400 animate-pulse">Resolving...</p>}
+                  {!isResolving && hostError && <p className="text-red-500 dark:text-red-400">{hostError}</p>}
+                  {!isResolving && resolutionInfo && <p className="text-green-600 dark:text-green-400">{resolutionInfo}</p>}
+                </div>
+              </div>
+              <div>
+                  <label className="block text-sm font-medium text-gray-600 dark:text-gray-400">Duration</label>
+                  <div className="flex items-center space-x-2 mt-1">
+                      <div className="w-1/2">
+                          <input
+                              type="number"
+                              id="durationH"
+                              name="durationH"
+                              value={durationH}
+                              onChange={handleDurationChange}
+                              disabled={isRunning}
+                              className="block w-full bg-slate-100 dark:bg-gray-800 border-slate-300 dark:border-gray-600 rounded-md shadow-sm sm:text-sm text-slate-900 dark:text-white px-3 py-2 disabled:opacity-50"
+                              min="0"
+                              step="1"
+                          />
+                          <label htmlFor="durationH" className="text-xs text-gray-500">Hours</label>
+                      </div>
+                      <div className="w-1/2">
+                          <input
+                              type="number"
+                              id="durationM"
+                              name="durationM"
+                              value={durationM}
+                              onChange={handleDurationChange}
+                              disabled={isRunning}
+                              className="block w-full bg-slate-100 dark:bg-gray-800 border-slate-300 dark:border-gray-600 rounded-md shadow-sm sm:text-sm text-slate-900 dark:text-white px-3 py-2 disabled:opacity-50"
+                              min="0"
+                              max="59"
+                              step="1"
+                          />
+                          <label htmlFor="durationM" className="text-xs text-gray-500">Minutes</label>
+                      </div>
+                  </div>
+              </div>
+              <div>
+                <label htmlFor="pingsPerSecond" className="block text-sm font-medium text-gray-600 dark:text-gray-400">Requests per Second</label>
+                 <select
+                  id="pingsPerSecond"
+                  name="pingsPerSecond"
+                  value={settings.pingsPerSecond}
+                  onChange={handleSettingsChange}
+                  disabled={isRunning}
+                  className="mt-1 block w-full bg-slate-100 dark:bg-gray-800 border-slate-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-cyan-500 focus:border-cyan-500 sm:text-sm text-slate-900 dark:text-white px-3 py-2 disabled:opacity-50"
+                >
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                  <option value="4">4</option>
+                </select>
+              </div>
+              <div>
+                <label htmlFor="criticalThreshold" className="block text-sm font-medium text-gray-600 dark:text-gray-400">Critical Latency Threshold (ms)</label>
+                <input
+                  type="number"
+                  id="criticalThreshold"
+                  name="criticalThreshold"
+                  value={settings.criticalThreshold}
+                  onChange={handleSettingsChange}
+                  disabled={isRunning}
+                  className="mt-1 block w-full bg-slate-100 dark:bg-gray-800 border-slate-300 dark:border-gray-600 rounded-md shadow-sm focus:ring-cyan-500 focus:border-cyan-500 sm:text-sm text-slate-900 dark:text-white px-3 py-2 disabled:opacity-50"
+                  min="50"
+                  step="50"
+                />
+              </div>
+               <div className="flex items-center">
+                  <input
+                      id="saveSettings"
+                      name="saveSettings"
+                      type="checkbox"
+                      checked={settings.saveSettings}
+                      onChange={handleSettingsChange}
+                      className="h-4 w-4 rounded border-gray-400 dark:border-gray-500 bg-slate-200 dark:bg-gray-800 text-cyan-600 focus:ring-cyan-500"
+                  />
+                  <label htmlFor="saveSettings" className="ml-2 block text-sm text-gray-600 dark:text-gray-400">
+                      Save settings between sessions
+                  </label>
+              </div>
+            </div>
+            <div className="mt-6">
+              {isRunning ? (
+                <button
+                  onClick={onStop}
+                  className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-md transition duration-200"
+                >
+                  Stop
+                </button>
+              ) : (
+                <button
+                  onClick={onStart}
+                  disabled={!canStart}
+                  className="w-full bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-2 px-4 rounded-md transition duration-200 disabled:bg-gray-500 dark:disabled:bg-gray-600 disabled:cursor-not-allowed"
+                >
+                  Start Monitoring
+                </button>
+              )}
+            </div>
+            <p className="text-xs text-gray-500 mt-4">Note: Measures website response time from your browser. Results may differ from standard network ping tools.</p>
+          </div>
+        );
+      };
+      
+      // --- From components/HelpModal.tsx ---
+      const HelpModal = ({ isOpen, onClose }) => {
+        React.useEffect(() => {
+          const handleKeyDown = (event) => {
+            if (event.key === 'Escape') {
+              onClose();
+            }
+          };
+          if (isOpen) {
+            document.addEventListener('keydown', handleKeyDown);
+          }
+          return () => {
+            document.removeEventListener('keydown', handleKeyDown);
+          };
+        }, [isOpen, onClose]);
+        if (!isOpen) {
+          return null;
+        }
+        const Section = ({ title, children }) => (
+          <section className="mb-6">
+            <h2 className="text-xl font-bold text-cyan-600 dark:text-cyan-400 mb-2 pb-1 border-b border-slate-200 dark:border-gray-700">{title}</h2>
+            <div className="space-y-2 text-slate-700 dark:text-gray-300">{children}</div>
+          </section>
+        );
+        const SubSection = ({ title, children }) => (
+            <div className="mt-4 pl-4 border-l-2 border-slate-200 dark:border-gray-800">
+              <h3 className="text-lg font-semibold text-slate-800 dark:text-gray-200 mb-1">{title}</h3>
+              <div className="space-y-2 text-slate-600 dark:text-gray-400 text-sm">{children}</div>
+            </div>
+        );
+        return (
+          <div
+            className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 z-50"
+            onClick={onClose}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="help-modal-title"
+          >
+            <div
+              className="bg-white dark:bg-gray-900 rounded-lg shadow-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto p-6 border border-slate-200 dark:border-gray-700"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex justify-between items-center mb-4">
+                <h1 id="help-modal-title" className="text-2xl font-bold text-cyan-600 dark:text-cyan-400">NetPulse - Help Guide</h1>
+                <button onClick={onClose} className="text-gray-500 dark:text-gray-400 hover:text-slate-900 dark:hover:text-white" aria-label="Close help guide">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              <div className="text-sm">
+                  <Section title="What is NetPulse?">
+                      <p>NetPulse is a real-time, graphical application-layer network latency monitoring tool. It continuously checks the round-trip time (RTT) to a specified host, providing a color-coded, per-second timeline of network performance along with live statistics.</p>
+                  </Section>
+                  <Section title="How to Use">
+                      <SubSection title="Configuration Panel">
+                          <p><strong>Target Host:</strong> Enter the domain name (e.g., google.com) or IP address you want to monitor. The tool will resolve the host and show you its IP or PTR record.</p>
+                          <p><strong>Duration:</strong> Set the total time for the monitoring session in hours and/or minutes.</p>
+                          <p><strong>Requests per Second:</strong> Choose how many times per second to check latency. Higher values give more detailed data but use more network resources.</p>
+                          <p><strong>Critical Latency Threshold:</strong> This value (in milliseconds) determines the color-coding for the timeline graph. Higher RTTs will appear in warmer colors (yellow, orange, red).</p>
+                          <p><strong>Save Settings:</strong> Check this to have the application remember your configuration between visits.</p>
+                      </SubSection>
+                      <SubSection title="Starting & Stopping">
+                          <p>Click <strong>"Start Monitoring"</strong> to begin a session. The button will turn into a red <strong>"Stop"</strong> button, which you can click to end the session at any time.</p>
+                      </SubSection>
+                  </Section>
+                  <Section title="Features">
+                      <SubSection title="The Network Path Visualizer">
+                          <p>This visualizer provides a live, at-a-glance overview of your network connection status from your machine to the target host.</p>
+                          <p><strong>Icons Explained:</strong>
+                              <ul className="list-disc list-inside mt-2 space-y-1">
+                                <li><strong>You:</strong> Represents your computer. It displays your local IP if detectable. The tooltip explains why it may not always appear due to browser privacy settings (WebRTC). The icon will be cyan as long as you have an internet connection, regardless of whether the IP is shown.</li>
+                                <li><strong>Gateway:</strong> Represents your local network's exit point, typically your router.</li>
+                                <li><strong>Internet:</strong> Represents the public internet and will display your public-facing (External) IP address and its resolved hostname.</li>
+                                <li><strong>Target:</strong> The host you are monitoring. It will display the resolved IP of the target host.</li>
+                              </ul>
+                          </p>
+                          <p className="mt-2"><strong>Animations & Colors:</strong> The visualizer uses a dual-line system for requests (outbound) and replies (inbound). During a monitoring session, a cyan line flows to the target and a second line flows back. The color of the return line dynamically changes (green, yellow, orange, red) to reflect the real-time latency of the connection.</p>
+                      </SubSection>
+                      <SubSection title="Shareable Settings">
+                          <p>Click the <strong>Share icon</strong> in the header to copy a unique URL to your clipboard. This URL contains all of your current configuration settings. Anyone who opens this link will have their NetPulse application launch with the exact same settings, making it easy to bookmark common tests or share them with colleagues.</p>
+                      </SubSection>
+                  </Section>
+                  <Section title="Reading the Results">
+                      <SubSection title="Timeline Graph (Sparkline)">
+                          <p>Each row represents one minute of data. The graph shows a visual representation of latency over that minute. Lower points mean better (lower) latency.</p>
+                          <p><strong>Interacting:</strong> Hover your mouse over the graph to see the latency for a specific point in time. Click on a point to "pin" a detailed tooltip with more information.</p>
+                      </SubSection>
+                       <SubSection title="Color Legend">
+                          <p>The colors of the lines in the graph correspond to the latency, based on your "Critical Latency Threshold" setting. Green is excellent, while Red indicates very poor latency or a failed request.</p>
+                      </SubSection>
+                      <SubSection title="Per-Minute Stats">
+                          <p>To the right of each timeline graph, you'll see the Minimum, Average, and Maximum RTT recorded for that one-minute interval.</p>
+                      </SubSection>
+                  </Section>
+                  <Section title="Summary & Exporting">
+                       <p>After a monitoring session concludes, a full statistical summary is displayed, showing aggregate data like total packets sent/received, packet loss percentage, and overall min/avg/max latency.</p>
+                       <p>You can use the <strong>Export</strong> button to save the session data as a PNG, PDF, CSV, or XLSX file for reporting or analysis.</p>
+                  </Section>
+                  <Section title="Technology & Methodology">
+                      <SubSection title="Technology Stack">
+                        <p>NetPulse is a client-side web application built with React, TypeScript, and Tailwind CSS.</p>
+                      </SubSection>
+                      <SubSection title="What NetPulse actually measures">
+                        <p>NetPulse shows real-world web (Application-layer) network latency, which is increasingly more relevant for web services than raw network pings. The RTT values you will see [eg: <strong><em>150ms</em></strong>] will include all the application-layer overhead which affects real-world user experiences.</p>
+                        <ul>
+                          <li><strong>Request Process:</strong>
+                            <ul className="list-disc list-inside mt-2 space-y-1">
+                              <li>[ 2ms] <strong>HTTP</strong> protocol setup and validation.</li>
+                              <li>[15ms] <strong>DNS</strong> lookups (if not cached) - <em>Domain Name Resolution</em>.</li>
+                              <li>[25ms] <strong>TCP</strong> connection establishment - <em>3-way handshake</em>.</li>
+                              <li>[35ms] <strong>TLS/SSL</strong> handshake for secure connections - <em>Certificate exchange & Encryption setup</em>.</li>
+                              <li>[ 8ms] <strong>HTTP</strong> header exchanges - <em>Request/Response metadata</em>.</li>
+                              <li>[30ms] <strong>Actual network transport time</strong> - <em>Data transmission across all network hops</em>.</li>
+                            </ul>
+                          </li>
+                          <p>&nbsp;</p>
+                          <li><strong>Response Process:</strong>
+                            <ul className="list-disc list-inside mt-2 space-y-1">
+                              <li>[20ms] Server processing time</li>
+                              <li>[15ms] Return Journey, back through all the layers with response data</li>
+                            </ul>
+                          </li>
+                        </ul>
+                      </SubSection>
+                      <SubSection title="A Note on 'Ping'">
+                          <p className="text-gray-500">For security reasons, web browsers cannot send true ICMP pings (<em>the kind used by command-line tools</em>). NetPulse measures latency by sending lightweight HTTP HEAD requests and timing the response. While this provides an excellent estimate of real-world web (Application-layer) network latency, the results likely will differ from a traditional ICMP ping.</p>
+                      </SubSection>
+                  </Section>
+              </div>
+            </div>
+          </div>
+        );
+      };
+      
+      // --- From App.tsx ---
+      const AppContent = () => {
+        const getInitialSettings = () => {
+          const urlParams = new URLSearchParams(window.location.search);
+          const urlHost = urlParams.get('host');
+          if (urlHost) {
+              const ppsValue = parseInt(urlParams.get('pps') || '1', 10);
+              return {
+                  host: urlHost,
+                  duration: parseInt(urlParams.get('duration') || '10', 10),
+                  criticalThreshold: parseInt(urlParams.get('threshold') || '500', 10),
+                  pingsPerSecond: [1, 2, 4].includes(ppsValue) ? ppsValue : 1,
+                  saveSettings: false,
+                  resolvedHost: '',
+              };
+          }
+          try {
+              const saved = localStorage.getItem('netPulseSettings');
+              if (saved) {
+                  const parsed = JSON.parse(saved);
+                  const settings = {
+                      host: '', duration: 10, criticalThreshold: 500, pingsPerSecond: 1,
+                      saveSettings: false, resolvedHost: '', ...parsed
+                  };
+                  if (!settings.saveSettings) {
+                      settings.host = '';
+                      settings.resolvedHost = '';
+                  }
+                  return settings;
+              }
+          } catch (error) {
+              console.error("Failed to parse settings from localStorage", error);
+          }
+          return {
+              host: '', duration: 10, criticalThreshold: 500, pingsPerSecond: 1,
+              saveSettings: false, resolvedHost: '',
+          };
+        };
+        
+        const AppStatus = {
+            Idle: 'Idle',
+            Running: 'Running',
+            Stopped: 'Stopped',
+            Finished: 'Finished',
+        };
+
+        const [settings, setSettings] = React.useState(getInitialSettings);
+        const [status, setStatus] = React.useState(AppStatus.Idle);
+        const [pingResults, setPingResults] = React.useState({});
+        const [summaryStats, setSummaryStats] = React.useState(null);
+        const [startTime, setStartTime] = React.useState(null);
+        const [ariaLiveMessage, setAriaLiveMessage] = React.useState('');
+        const [localIp, setLocalIp] = React.useState(null);
+        const [externalIp, setExternalIp] = React.useState(null);
+        const [externalIpHostname, setExternalIpHostname] = React.useState(null);
+        const [internetReachable, setInternetReachable] = React.useState(false);
+        const [targetReachable, setTargetReachable] = React.useState('unknown');
+        const [isHelpModalOpen, setIsHelpModalOpen] = React.useState(false);
+        const [shareFeedback, setShareFeedback] = React.useState('');
+        const [theme, setTheme] = React.useState(() => {
+          if (localStorage.getItem('netPulseTheme')) {
+              return localStorage.getItem('netPulseTheme');
+          }
+          return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        });
+
+        React.useEffect(() => {
+          if (theme === 'dark') {
+            document.documentElement.classList.add('dark');
+          } else {
+            document.documentElement.classList.remove('dark');
+          }
+          localStorage.setItem('netPulseTheme', theme);
+        }, [theme]);
+        const toggleTheme = () => {
+          setTheme(prevTheme => (prevTheme === 'light' ? 'dark' : 'light'));
+        };
+        const { setActiveTooltip } = useTooltip();
+        const pingerTimeoutRef = React.useRef(null);
+        const stopTimeRef = React.useRef(null);
+        
+        React.useEffect(() => {
+          const checkConnectivity = async () => {
+              try {
+                  await fetch(`https://1.1.1.1?t=${Date.now()}`, { method: 'HEAD', mode: 'no-cors', cache: 'no-store' });
+                  setInternetReachable(true);
+              } catch (error) {
+                  setInternetReachable(false);
+              }
+          };
+          checkConnectivity();
+          const intervalId = setInterval(checkConnectivity, 10000);
+          return () => clearInterval(intervalId);
+        }, []);
+        React.useEffect(() => {
+          getLocalIpAddress().then(ip => {
+            if (ip) setLocalIp(ip);
+          });
+          getExternalIpAddress().then(async ip => {
+            if (ip) {
+              setExternalIp(ip);
+              const { result } = await resolveHost(ip);
+              if (result) {
+                  setExternalIpHostname(result);
+              }
+            }
+          });
+        }, []);
+        React.useEffect(() => {
+          const allResults = Object.values(pingResults).flat().filter((r) => r !== null);
+          const latestResult = allResults.length > 0 ? allResults[allResults.length - 1] : null;
+          updateFavicon(status === AppStatus.Running ? 'running' : 'idle', latestResult, settings.criticalThreshold);
+        }, [pingResults, status, settings.criticalThreshold]);
+        
+        const stopPinging = React.useCallback((finalStatus) => {
+          if (pingerTimeoutRef.current) {
+            clearTimeout(pingerTimeoutRef.current);
+            pingerTimeoutRef.current = null;
+          }
+          setStatus(finalStatus);
+          setAriaLiveMessage(finalStatus === AppStatus.Finished ? 'Monitoring finished.' : 'Monitoring stopped.');
+        }, []);
+        
+        React.useEffect(() => {
+          if (status === AppStatus.Finished || status === AppStatus.Stopped) {
+              const allResults = Object.values(pingResults).flat().filter((r) => r !== null);
+              if (startTime) {
+                  const finalSummary = {
+                      ...calculateStats(allResults),
+                      startTime: new Date(startTime).toISOString(),
+                      stopTime: new Date().toISOString(),
+                      totalDuration: Math.round((Date.now() - startTime) / 1000),
+                  };
+                  setSummaryStats(finalSummary);
+              }
+          }
+        }, [status, pingResults, startTime]);
+        
+        const performPing = React.useCallback(async () => {
+          const now = new Date();
+          const minuteTimestamp = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes()).toISOString();
+          const pps = settings.pingsPerSecond;
+          const second = now.getSeconds();
+          const milliseconds = now.getMilliseconds();
+          const index = second * pps + Math.floor((milliseconds / 1000) * pps);
+          const start = performance.now();
+          let result;
+          try {
+              await fetch(`https://${settings.host}?t=${Date.now()}`, { method: 'HEAD', mode: 'no-cors', cache: 'no-store' });
+              const end = performance.now();
+              result = { rtt: Math.round(end - start), status: 'success', timestamp: Date.now() };
+              setTargetReachable(prev => prev === 'unknown' ? true : prev);
+          } catch (error) {
+              result = { rtt: 0, status: 'failed', timestamp: Date.now() };
+          }
+          setPingResults(prev => {
+              const newResults = { ...prev };
+              if (!newResults[minuteTimestamp]) {
+                  newResults[minuteTimestamp] = Array(60 * pps).fill(null);
+              }
+              const newMinuteResults = [...newResults[minuteTimestamp]];
+              newMinuteResults[index] = result;
+              newResults[minuteTimestamp] = newMinuteResults;
+              return newResults;
+          });
+        }, [settings.host, settings.pingsPerSecond]);
+        
+        const scheduleNextPing = React.useCallback(() => {
+          if (stopTimeRef.current && Date.now() >= stopTimeRef.current) {
+              stopPinging(AppStatus.Finished);
+              return;
+          }
+          performPing();
+          const tickDuration = 1000 / settings.pingsPerSecond;
+          const now = Date.now();
+          const delay = tickDuration - (now % tickDuration);
+          pingerTimeoutRef.current = setTimeout(scheduleNextPing, delay);
+        }, [performPing, stopPinging, settings.pingsPerSecond]);
+
+        const handleStart = () => {
+          const startTimestamp = Date.now();
+          setPingResults({});
+          setSummaryStats(null);
+          setStartTime(startTimestamp);
+          setStatus(AppStatus.Running);
+          setActiveTooltip(null);
+          setTargetReachable('unknown');
+          setAriaLiveMessage(`Monitoring started for host ${settings.host}.`);
+          stopTimeRef.current = startTimestamp + settings.duration * 60 * 1000;
+          scheduleNextPing();
+        };
+        const handleStop = () => stopPinging(AppStatus.Stopped);
+        const handleShare = () => {
+          if (!settings.host) {
+              setShareFeedback('Set a host to share!');
+              setTimeout(() => setShareFeedback(''), 2000);
+              return;
+          }
+          const params = new URLSearchParams();
+          params.set('host', settings.host);
+          params.set('duration', settings.duration.toString());
+          params.set('pps', settings.pingsPerSecond.toString());
+          params.set('threshold', settings.criticalThreshold.toString());
+          const shareUrl = `${window.location.origin}${window.location.pathname}?${params.toString()}`;
+          navigator.clipboard.writeText(shareUrl).then(() => {
+              setShareFeedback('Copied!');
+              setTimeout(() => setShareFeedback(''), 2000);
+          }).catch(err => {
+              console.error('Failed to copy URL: ', err);
+              setShareFeedback('Copy failed!');
+              setTimeout(() => setShareFeedback(''), 2000);
+          });
+        };
+        const settingsRef = React.useRef(settings);
+        React.useEffect(() => {
+          const isFinished = status === AppStatus.Stopped || status === AppStatus.Finished;
+          if (isFinished && startTime !== null && JSON.stringify(settings) !== JSON.stringify(settingsRef.current)) {
+              setPingResults({});
+              setSummaryStats(null);
+              setStartTime(null);
+              setActiveTooltip(null);
+              setTargetReachable('unknown');
+          }
+          settingsRef.current = settings;
+        }, [settings, status, startTime, setActiveTooltip]);
+        
+        const ThemeToggle = ({ theme, toggleTheme }) => (
+            <button
+                onClick={toggleTheme}
+                className="p-2 rounded-full text-gray-500 dark:text-gray-400 hover:bg-slate-200 dark:hover:bg-gray-800 hover:text-cyan-500 dark:hover:text-cyan-400 transition-colors"
+                aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
+            >
+                {theme === 'light' ? (
+                     <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+                     </svg>
+                ) : (
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+                    </svg>
+                )}
+            </button>
+        );
+
+        return (
+          <div className="min-h-screen font-mono p-4 sm:p-6 lg:p-8">
+            <div className="sr-only" role="status" aria-live="assertive">{ariaLiveMessage}</div>
+            <div className="max-w-7xl mx-auto">
+              <header className="mb-8 flex justify-between items-start">
+                  <div class="flex items-center">
+                    <img src="./logo.svg" alt="NetPulse Logo" class="h-20 w-20 mr-4" />
+                    <div>
+                      <h1 className="text-3xl sm:text-4xl font-bold text-cyan-600 dark:text-cyan-400">NetPulse</h1>
+                      <p className="text-gray-600 dark:text-gray-400 mt-1">A real-time, graphical network latency monitor.</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                      <ThemeToggle theme={theme} toggleTheme={toggleTheme} />
+                      <div className="relative">
+                          <button 
+                            onClick={handleShare} 
+                            className="p-2 rounded-full text-gray-500 dark:text-gray-400 hover:bg-slate-200 dark:hover:bg-gray-800 hover:text-cyan-500 dark:hover:text-cyan-400 transition-colors"
+                            aria-label="Share current settings"
+                          >
+                              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M8.684 13.342C8.886 12.938 9 12.482 9 12s-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.367 2.684 3 3 0 00-5.367-2.684z" />
+                              </svg>
+                          </button>
+                          {shareFeedback && (
+                              <div className="absolute top-full mt-2 right-0 bg-gray-800 text-white text-xs font-sans rounded py-1 px-2 transition-opacity duration-300">
+                                  {shareFeedback}
+                              </div>
+                          )}
+                      </div>
+                      <button 
+                        onClick={() => setIsHelpModalOpen(true)} 
+                        className="p-2 rounded-full text-gray-500 dark:text-gray-400 hover:bg-slate-200 dark:hover:bg-gray-800 hover:text-cyan-500 dark:hover:text-cyan-400 transition-colors"
+                        aria-label="Open help guide"
+                      >
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                          </svg>
+                      </button>
+                  </div>
+              </header>
+              <main className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <div className="lg:col-span-1">
+                  <SettingsPanel settings={settings} setSettings={setSettings} onStart={handleStart} onStop={handleStop} status={status} />
+                </div>
+                <div className="lg:col-span-2">
+                  <ResultsDisplay 
+                    settings={settings} 
+                    status={status} 
+                    pingResults={pingResults} 
+                    summaryStats={summaryStats} 
+                    startTime={startTime} 
+                    localIp={localIp} 
+                    externalIp={externalIp}
+                    externalIpHostname={externalIpHostname}
+                    internetReachable={internetReachable}
+                    targetReachable={targetReachable}
+                  />
+                </div>
+              </main>
+            </div>
+            <HelpModal isOpen={isHelpModalOpen} onClose={() => setIsHelpModalOpen(false)} />
+          </div>
+        );
+      };
+      
+      const App = () => (
+          <TooltipProvider>
+              <AppContent />
+          </TooltipProvider>
+      );
+      
+      // --- From index.tsx ---
+      const rootElement = document.getElementById('root');
+      if (!rootElement) {
+        throw new Error("Could not find root element to mount to");
+      }
+      const root = ReactDOM.createRoot(rootElement);
+      root.render(
+        <React.StrictMode>
+          <App />
+        </React.StrictMode>
+      );
+    </script>
+<!-- <script type="module" src="/index.tsx"></script> -->
+</body>
+</html>

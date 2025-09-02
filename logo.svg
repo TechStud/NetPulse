@@ -1,0 +1,67 @@
+<svg width="120" height="120" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background circle -->
+  <circle cx="60" cy="60" r="55" fill="#21262d" stroke="#30363d" stroke-width="2"/>
+  
+  <!-- Letter N with pulse line -->
+  <g fill="#06b6d4" stroke="none">
+    <!-- Left vertical stroke of N -->
+    <rect x="25" y="35" width="8" height="50" />
+    
+    <!-- Right vertical stroke of N -->
+    <rect x="87" y="35" width="8" height="50" />
+    
+    <!-- Pulse line replacing diagonal stroke -->
+    <path d="M 33 75 
+             L 42 75 
+             L 45 65 
+             L 48 85 
+             L 51 45 
+             L 54 95 
+             L 57 35 
+             L 60 60 
+             L 63 75 
+             L 66 65 
+             L 69 80 
+             L 72 70 
+             L 75 75 
+             L 84 45" 
+          stroke="#06b6d4" 
+          stroke-width="3" 
+          fill="none" 
+          stroke-linecap="round" 
+          stroke-linejoin="round"/>
+  </g>
+  
+  <!-- Subtle glow effect -->
+  <defs>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+      <feMerge> 
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  
+  <!-- Apply glow to pulse line -->
+  <path d="M 33 75 
+           L 42 75 
+           L 45 65 
+           L 48 85 
+           L 51 45 
+           L 54 95 
+           L 57 35 
+           L 60 60 
+           L 63 75 
+           L 66 65 
+           L 69 80 
+           L 72 70 
+           L 75 75 
+           L 84 45" 
+        stroke="#22d3ee" 
+        stroke-width="1" 
+        fill="none" 
+        stroke-linecap="round" 
+        filter="url(#glow)" 
+        opacity="0.7"/>
+</svg>
